@@ -7,66 +7,53 @@ import (
 	"strings"
 )
 
-const redactedValue = "[REDACTED]"
-
+// DumpOption customizes safe diagnostic output.
 type DumpOption func(*dumpOptions)
 
-type dumpOptions struct {
-	sensitive map[string]struct{}
-}
+type dumpOptions struct{ sensitive map[string]struct{} }
 
+// WithSensitiveKeys adds exact dotted keys to the default redaction set.
 func WithSensitiveKeys(keys ...string) DumpOption {
 	return func(options *dumpOptions) {
 		for _, key := range keys {
-			options.sensitive[strings.ToLower(key)] = struct{}{}
+			options.sensitive[normalizeKey(key)] = struct{}{}
 		}
 	}
 }
 
-func dumpSnapshot(w io.Writer, snapshot *Snapshot, options ...DumpOption) error {
-	if snapshot == nil {
-		return fmt.Errorf("config: snapshot is nil")
-	}
+// DumpTo writes sorted and redacted configuration diagnostics.
+func (s Snapshot[T]) DumpTo(writer io.Writer, options ...DumpOption) error {
 	configuration := dumpOptions{sensitive: make(map[string]struct{})}
 	for _, option := range options {
 		if option != nil {
 			option(&configuration)
 		}
 	}
-
-	settings := make(map[string]any)
-	_ = walkLeaves(nil, snapshot.Settings(), func(path []string, value any) error {
-		settings[joinPath(path)] = value
-		return nil
-	})
-	keys := make([]string, 0, len(settings))
-	for key := range settings {
+	values := flatten(structMap(s.value))
+	keys := make([]string, 0, len(values))
+	for key := range values {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-
 	for _, key := range keys {
-		value := fmt.Sprint(settings[key])
-		if isSensitiveKey(key, configuration.sensitive) {
-			value = redactedValue
+		value := fmt.Sprint(values[key])
+		if sensitiveKey(key, configuration.sensitive) {
+			value = "[REDACTED]"
 		}
-		if _, err := fmt.Fprintf(w, "%s=%s source=%s\n", key, value, snapshot.Source(key)); err != nil {
+		if _, err := fmt.Fprintf(writer, "%s=%s\n", key, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func isSensitiveKey(key string, exact map[string]struct{}) bool {
-	lower := strings.ToLower(key)
-	if _, found := exact[lower]; found {
+func sensitiveKey(key string, exact map[string]struct{}) bool {
+	if _, ok := exact[normalizeKey(key)]; ok {
 		return true
 	}
-	for _, part := range strings.FieldsFunc(lower, func(r rune) bool {
-		return r == '.' || r == '_' || r == '-'
-	}) {
+	for _, part := range strings.FieldsFunc(strings.ToLower(key), func(r rune) bool { return r == '.' || r == '_' || r == '-' }) {
 		switch part {
-		case "secret", "password", "passwd", "token", "credential", "privatekey", "apikey", "dsn":
+		case "secret", "password", "passwd", "token", "credential", "privatekey", "apikey", "dsn", "pass":
 			return true
 		}
 	}
